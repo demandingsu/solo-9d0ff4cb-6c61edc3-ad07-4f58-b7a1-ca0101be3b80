@@ -1,0 +1,19 @@
+{# 分区表片段：由首页折叠面板通过 /rules-table 异步加载，也供 <noscript> 直接渲染。 #}
+<div class="table-scroll">
+  <table class="table">
+    <thead>
+      <tr><th>#</th><th>分区名</th><th>优先级</th><th>水位闭区间</th><th>流量闭区间</th></tr>
+    </thead>
+    <tbody>
+      {% for r in current.rules %}
+        <tr class="{{ 'flood-row' if r.zone == '洪水样本区' else '' }}">
+          <td>{{ loop.index }}</td>
+          <td><strong>{{ r.zone }}</strong>{% if r.zone == '洪水样本区' %} <span class="badge badge-flood">高水 × 高流量优先</span>{% endif %}</td>
+          <td><span class="prio prio-{{ 'top' if r.priority == 1 else 'normal' }}">{{ r.priority }}</span></td>
+          <td>[{{ r.wl_min }}, {{ r.wl_max }}]</td>
+          <td>[{{ r.fl_min }}, {{ r.fl_max }}]</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

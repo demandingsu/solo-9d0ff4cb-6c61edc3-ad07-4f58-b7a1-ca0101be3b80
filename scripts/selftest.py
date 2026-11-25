@@ -24,7 +24,40 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from hydrology import create_app  # noqa: E402
-from hydrology.domain import Range, Rule, verify  # noqa: E402
+from hydrology.domain import (  # noqa: E402
+    Range,
+    Rule,
+    classify_pair,
+    classify_rules,
+    verify,
+)
+from hydrology.index import SpatialIndex  # noqa: E402
+from hydrology.seed import SEED_RANGE as SEED_RANGE_FOR_SELFTEST  # noqa: E402
+from hydrology.seed import build_seed_rules  # noqa: E402
+
+
+def build_seed_rules_for_selftest(current_payload):
+    """把 /api/current 的规则字典还原为 Rule 对象（保持 ord 顺序）。"""
+    return [
+        Rule(
+            zone=r["zone"],
+            priority=r["priority"],
+            wl_min=r["wl_min"],
+            wl_max=r["wl_max"],
+            fl_min=r["fl_min"],
+            fl_max=r["fl_max"],
+            ord=r.get("ord"),
+            id=r.get("rule_id"),
+        )
+        for r in current_payload["rules"]
+    ]
+
+
+def snapshot_classify_equiv(rules, wl, fl):
+    """与 Snapshot.classify 相同的索引路径（此处直接构造索引做等价对照）。"""
+    return classify_rules(
+        SEED_RANGE_FOR_SELFTEST, rules, wl, fl, index=SpatialIndex(rules)
+    )
 
 CHECKS: list[tuple[str, bool, str]] = []
 
@@ -248,7 +281,122 @@ def main() -> int:
     )
 
     # ------------------------------------------------------------------ #
-    banner("5. 页面冒烟")
+    banner("5. 双轴空间索引：稀疏命中只查局部候选、整数闭区间边界")
+    # ------------------------------------------------------------------ #
+    seed_rules = build_seed_rules_for_selftest(current)
+    index = SpatialIndex(seed_rules)
+
+    # 5.1 索引结果与暴力全表扫描在一批点上完全一致（含全部区间端点）。
+    boundary_points = [
+        (0, 0), (49, 399), (50, 400), (79, 799), (80, 800),
+        (84, 849), (85, 850), (86, 850), (85, 849), (90, 900),
+        (100, 1000), (100, 850), (85, 1000), (49, 400), (50, 399),
+    ]
+    equivalent = True
+    for wl, fl in boundary_points:
+        via_index = [r.zone for r in index.query(wl, fl)]
+        via_scan = [r.zone for r in seed_rules if r.covers(wl, fl)]
+        if via_index != via_scan:
+            equivalent = False
+            print(f"    不一致点 ({wl},{fl}): index={via_index} scan={via_scan}")
+    check("索引与全表扫描在 15 个边界点上结果完全一致", equivalent)
+
+    # 5.2 整数闭区间：四个角点全部命中，端点外侧相邻整数不命中。
+    flood = next(r for r in seed_rules if r.zone == "洪水样本区")
+    corners = [(85, 850), (85, 1000), (100, 850), (100, 1000)]
+    corner_ok = all(
+        any(r.zone == "洪水样本区" for r in index.query(wl, fl))
+        for wl, fl in corners
+    )
+    outside_ok = all(index.query(wl, fl) and not any(
+        r.zone == "洪水样本区" for r in index.query(wl, fl)
+    ) for wl, fl in [(84, 900), (90, 849)])
+    check("洪水样本区闭区间四角点命中、外侧相邻整数不命中", corner_ok and outside_ok)
+
+    # 5.3 稀疏分散的大规则集：单点命中稀疏时，复核的候选远少于规则总数。
+    sparse_rules = []
+    n_per_axis = 20
+    step = 20_000 // n_per_axis
+    seq = 0
+    for i in range(n_per_axis):
+        for j in range(n_per_axis):
+            sparse_rules.append(
+                Rule(
+                    zone=f"网格{i}-{j}", priority=10,
+                    wl_min=i * step,
+                    wl_max=(i + 1) * step - 1 if i < n_per_axis - 1 else 20_000,
+                    fl_min=j * step,
+                    fl_max=(j + 1) * step - 1 if j < n_per_axis - 1 else 20_000,
+                    ord=seq,
+                )
+            )
+            seq += 1
+    sparse_index = SpatialIndex(sparse_rules)
+    stats = sparse_index.query_stats(5_025, 12_025)
+    print(
+        f"    规则总数 {stats['rule_count']}；该点水位轴候选 "
+        f"{stats['wl_axis_candidates']}、流量轴候选 {stats['fl_axis_candidates']}、"
+        f"交集候选 {stats['intersection_candidates']}、闭区间复核 "
+        f"{stats['covers_checked']} 条、命中 {stats['matched']} 条"
+    )
+    check(
+        "稀疏命中：交集候选与复核条数远小于规则总数（只查局部候选）",
+        stats["rule_count"] == 400
+        and stats["matched"] == 1
+        and stats["covers_checked"] == 1
+        and stats["intersection_candidates"] <= 4,
+    )
+    empty_stats = sparse_index.query_stats(50_000, 50_000)
+    check(
+        "无命中点零候选复核",
+        empty_stats["intersection_candidates"] == 0
+        and empty_stats["covers_checked"] == 0,
+    )
+
+    # 5.4 索引存储随规则条数线性：每条规则在每棵树恰占两个序号位。
+    def tree_nodes(node):
+        if node is None:
+            return 0
+        return (
+            len(node.by_lo) + len(node.by_hi)
+            + tree_nodes(node.left) + tree_nodes(node.right)
+        )
+
+    index_slots = tree_nodes(sparse_index._wl_tree.root) + tree_nodes(
+        sparse_index._fl_tree.root
+    )
+    check(
+        "索引空间随规则条数线性增长（序号槽位 = 4 × 规则数）",
+        index_slots == 4 * len(sparse_rules),
+        f"{index_slots} slots / {len(sparse_rules)} rules",
+    )
+
+    # 5.5 经索引与经线性扫描的 classify 载荷完全相同。
+    payload_same = all(
+        classify_pair(SEED_RANGE_FOR_SELFTEST, seed_rules, wl, fl)
+        == snapshot_classify_equiv(seed_rules, wl, fl)
+        for wl, fl in boundary_points
+    )
+    check("索引路径与线性路径的查算响应字典完全一致", payload_same)
+
+    # ------------------------------------------------------------------ #
+    banner("6. 首页分区表懒加载（点开才加载，首屏不读全表）")
+    # ------------------------------------------------------------------ #
+    home = client.get("/")
+    check("首页首屏含懒加载折叠面板", b'id="rules-panel"' in home.data)
+    check("首页首屏不渲染规则行（无洪水样本区字样）", "洪水样本区".encode() not in home.data)
+    check("首页首屏仍展示规则条数", "共 10 条规则".encode() in home.data)
+    frag = client.get("/rules-table")
+    check(
+        "GET /rules-table 返回分区表片段（10 条规则、无整页骨架）",
+        frag.status_code == 200
+        and "洪水样本区".encode() in frag.data
+        and b"<html" not in frag.data,
+    )
+    check("首页保留 <noscript> 无脚本回退", b"<noscript>" in home.data)
+
+    # ------------------------------------------------------------------ #
+    banner("7. 页面冒烟")
     # ------------------------------------------------------------------ #
     for path, token in [
         ("/", "现行分区表"),

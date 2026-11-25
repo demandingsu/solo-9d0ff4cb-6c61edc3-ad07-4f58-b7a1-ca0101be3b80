@@ -13,9 +13,16 @@ from flask import (
     url_for,
 )
 
-from .db import get_attempt, get_db, list_attempts, load_current
-from .domain import RANGE_KEYS, coerce_pair, classify_pair
+from .db import (
+    get_attempt,
+    get_db,
+    list_attempts,
+    load_current,
+    load_current_overview,
+)
+from .domain import RANGE_KEYS, coerce_pair
 from .publish import KIND_LABELS, VALID_KINDS, submit_publish
+from .snapshot import get_snapshot_store
 
 bp = Blueprint("web", __name__)
 
@@ -36,7 +43,10 @@ def kind_label_filter(kind):
 @bp.get("/")
 def index():
     db = get_db()
-    current = load_current(db)
+    # 首页首屏只读取量程、版本指针与规则条数等轻量信息；整张分区表改为
+    # 点开折叠面板时再经 /rules-table 加载，不在首屏把规则全表读出来。
+    overview = load_current_overview(db)
+    rule_count = overview["rule_count"]
 
     wl_raw = (request.args.get("wl") or "").strip()
     fl_raw = (request.args.get("flow") or "").strip()
@@ -46,21 +56,33 @@ def index():
         wl, fl, errors = coerce_pair(wl_raw or None, fl_raw or None)
         if errors:
             result = {"status": "bad_input", "errors": errors}
-        elif current["range"] is None:
-            result = {
-                "status": "not_initialized",
-                "errors": ["现行口径尚未初始化"],
-            }
         else:
-            result = classify_pair(current["range"], current["rules"], wl, fl)
+            # 与 /api/classify 共用进程内快照和双轴空间索引：查算开始时
+            # 生效的量程 / 规则版本在整次请求内保持固定。
+            snapshot = get_snapshot_store().current(db)
+            if snapshot is None or snapshot.range is None:
+                result = {
+                    "status": "not_initialized",
+                    "errors": ["现行口径尚未初始化"],
+                }
+            else:
+                result = snapshot.classify(wl, fl)
 
     return render_template(
         "index.html",
-        current=current,
+        current=overview,
+        rule_count=rule_count,
         result=result,
         wl_raw=wl_raw,
         fl_raw=fl_raw,
     )
+
+
+@bp.get("/rules-table")
+def rules_table_fragment():
+    """分区表片段：首页折叠面板点开时才加载（不进首屏、不触发全表首读）。"""
+    current = load_current(get_db())
+    return render_template("_rules_table.html", current=current)
 
 
 def _range_data_from_form(form) -> dict[str, str]:

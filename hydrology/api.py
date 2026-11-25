@@ -5,8 +5,9 @@ from __future__ import annotations
 from flask import Blueprint, current_app, jsonify, request
 
 from .db import get_db, load_current
-from .domain import coerce_pair, parse_range, parse_rules, classify_pair, verify
+from .domain import coerce_pair, parse_range, parse_rules, verify
 from .publish import submit_publish
+from .snapshot import get_snapshot_store
 
 bp = Blueprint("api", __name__)
 
@@ -48,11 +49,13 @@ def api_classify():
     if errors:
         return jsonify({"status": "bad_input", "errors": errors}), 400
 
-    current = load_current(get_db())
-    if current["range"] is None:
+    # 与首页单点查算共用同一个进程内快照 + 双轴空间索引：
+    # 快照版本固定为本次查算开始时已生效的量程 / 规则版本。
+    snapshot = get_snapshot_store().current(get_db())
+    if snapshot is None or snapshot.range is None:
         return jsonify({"status": "not_initialized"}), 503
 
-    return jsonify(classify_pair(current["range"], current["rules"], wl, fl))
+    return jsonify(snapshot.classify(wl, fl))
 
 
 def _extract_range(body: dict):

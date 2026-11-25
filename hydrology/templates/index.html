@@ -98,25 +98,54 @@
 </section>
 
 <section class="card">
-  <h2>现行分区表（版本 #{{ current.rules_id }}，共 {{ current.rules|length }} 条规则）</h2>
-  <div class="table-scroll">
-    <table class="table">
-      <thead>
-        <tr><th>#</th><th>分区名</th><th>优先级</th><th>水位闭区间</th><th>流量闭区间</th></tr>
-      </thead>
-      <tbody>
-        {% for r in current.rules %}
-          <tr class="{{ 'flood-row' if r.zone == '洪水样本区' else '' }}">
-            <td>{{ loop.index }}</td>
-            <td><strong>{{ r.zone }}</strong>{% if r.zone == '洪水样本区' %} <span class="badge badge-flood">高水 × 高流量优先</span>{% endif %}</td>
-            <td><span class="prio prio-{{ 'top' if r.priority == 1 else 'normal' }}">{{ r.priority }}</span></td>
-            <td>[{{ r.wl_min }}, {{ r.wl_max }}]</td>
-            <td>[{{ r.fl_min }}, {{ r.fl_max }}]</td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
+  <details class="lazy-rules" id="rules-panel"
+           data-src="{{ url_for('web.rules_table_fragment') }}">
+    <summary>
+      <h2 style="display:inline">现行分区表（版本 #{{ current.rules_id }}，共 {{ rule_count }} 条规则）</h2>
+      <span class="muted small lazy-hint">（点开才加载整张规则表）</span>
+    </summary>
+    <div class="lazy-body" data-state="idle">
+      <p class="muted lazy-loading" hidden>正在加载现行分区表…</p>
+      <p class="error-text lazy-error" hidden>分区表加载失败，请刷新重试。</p>
+      <noscript>
+        {# 无脚本时回退为随首屏直接渲染的分区表。 #}
+        {% include "_rules_table.html" %}
+      </noscript>
+    </div>
+  </details>
 </section>
 
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var panel = document.getElementById('rules-panel');
+  if (!panel) return;
+  var body = panel.querySelector('.lazy-body');
+  var loading = panel.querySelector('.lazy-loading');
+  var errorBox = panel.querySelector('.lazy-error');
+
+  panel.addEventListener('toggle', function () {
+    if (!panel.open || body.getAttribute('data-state') !== 'idle') return;
+    body.setAttribute('data-state', 'loading');
+    loading.hidden = false;
+
+    fetch(panel.getAttribute('data-src'), { headers: { 'X-Requested-With': 'fetch' } })
+      .then(function (resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.text();
+      })
+      .then(function (html) {
+        body.innerHTML = html;
+        body.setAttribute('data-state', 'loaded');
+      })
+      .catch(function () {
+        loading.hidden = true;
+        errorBox.hidden = false;
+        body.setAttribute('data-state', 'error');
+      });
+  });
+})();
+</script>
 {% endblock %}

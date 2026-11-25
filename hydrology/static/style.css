@@ -227,3 +227,10 @@ input.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 details summary { cursor: pointer; }
 details[open] summary { margin-bottom: 8px; }
+
+/* ---------------- 首页分区表懒加载 ---------------- */
+.lazy-rules summary { list-style: revert; user-select: none; }
+.lazy-rules summary::-webkit-details-marker { margin-right: 4px; }
+.lazy-rules .lazy-hint { font-weight: 400; margin-left: 6px; }
+.lazy-rules .lazy-body { margin-top: 10px; }
+.lazy-loading, .lazy-error { margin: 8px 0; }

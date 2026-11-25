@@ -201,9 +201,23 @@ def _meta_int(conn: sqlite3.Connection, key: str) -> Optional[int]:
     return int(row["value"]) if row is not None else None
 
 
-def load_current(conn: sqlite3.Connection) -> dict[str, Any]:
-    range_id = _meta_int(conn, "current_range_id")
-    rules_id = _meta_int(conn, "current_rules_id")
+def read_current_ids(conn: sqlite3.Connection) -> tuple[Optional[int], Optional[int]]:
+    """只读取现行两个版本指针。
+
+    两个指针在同一条 ``BEGIN IMMEDIATE`` 发布事务内先后更新并随事务一起
+    提交，WAL 快照读保证这里看到的要么都是旧版本、要么都是新版本，不会
+    读到跨事务的“半新半旧”指针组合。
+    """
+    return (
+        _meta_int(conn, "current_range_id"),
+        _meta_int(conn, "current_rules_id"),
+    )
+
+
+def load_versioned(
+    conn: sqlite3.Connection, range_id: int, rules_id: int
+) -> dict[str, Any]:
+    """按指定版本号读取量程与分区表（与现行指针解耦，供快照缓存使用）。"""
     result: dict[str, Any] = {
         "range_id": range_id,
         "rules_id": rules_id,
@@ -212,43 +226,95 @@ def load_current(conn: sqlite3.Connection) -> dict[str, Any]:
         "rules_version_meta": None,
         "rules": [],
     }
+    row = conn.execute(
+        "SELECT * FROM range_versions WHERE id=?", (range_id,)
+    ).fetchone()
+    if row is not None:
+        result["range"] = Range(
+            wl_min=row["wl_min"],
+            wl_max=row["wl_max"],
+            fl_min=row["fl_min"],
+            fl_max=row["fl_max"],
+        )
+        result["range_meta"] = dict(row)
+
+    vrow = conn.execute(
+        "SELECT * FROM rules_versions WHERE id=?", (rules_id,)
+    ).fetchone()
+    if vrow is not None:
+        result["rules_version_meta"] = dict(vrow)
+    rows = conn.execute(
+        "SELECT * FROM rules WHERE version_id=? ORDER BY ord, id",
+        (rules_id,),
+    ).fetchall()
+    result["rules"] = [
+        Rule(
+            id=r["id"],
+            ord=r["ord"],
+            zone=r["zone"],
+            priority=r["priority"],
+            wl_min=r["wl_min"],
+            wl_max=r["wl_max"],
+            fl_min=r["fl_min"],
+            fl_max=r["fl_max"],
+        )
+        for r in rows
+    ]
+    return result
+
+
+def load_current_overview(conn: sqlite3.Connection) -> dict[str, Any]:
+    """首页首屏的轻量口径：只读版本指针、量程元数据与规则条数，不读规则行。
+
+    整张分区表改由 ``/rules-table`` 在资料员点开折叠面板时再加载。
+    """
+    range_id, rules_id = read_current_ids(conn)
+    overview: dict[str, Any] = {
+        "range_id": range_id,
+        "rules_id": rules_id,
+        "range": None,
+        "range_meta": None,
+        "rules_version_meta": None,
+        "rules": [],
+        "rule_count": 0,
+    }
     if range_id is not None:
         row = conn.execute(
             "SELECT * FROM range_versions WHERE id=?", (range_id,)
         ).fetchone()
         if row is not None:
-            result["range"] = Range(
+            overview["range"] = Range(
                 wl_min=row["wl_min"],
                 wl_max=row["wl_max"],
                 fl_min=row["fl_min"],
                 fl_max=row["fl_max"],
             )
-            result["range_meta"] = dict(row)
-
+            overview["range_meta"] = dict(row)
     if rules_id is not None:
         vrow = conn.execute(
             "SELECT * FROM rules_versions WHERE id=?", (rules_id,)
         ).fetchone()
         if vrow is not None:
-            result["rules_version_meta"] = dict(vrow)
-        rows = conn.execute(
-            "SELECT * FROM rules WHERE version_id=? ORDER BY ord, id",
-            (rules_id,),
-        ).fetchall()
-        result["rules"] = [
-            Rule(
-                id=r["id"],
-                ord=r["ord"],
-                zone=r["zone"],
-                priority=r["priority"],
-                wl_min=r["wl_min"],
-                wl_max=r["wl_max"],
-                fl_min=r["fl_min"],
-                fl_max=r["fl_max"],
-            )
-            for r in rows
-        ]
-    return result
+            overview["rules_version_meta"] = dict(vrow)
+        count_row = conn.execute(
+            "SELECT COUNT(*) AS c FROM rules WHERE version_id=?", (rules_id,)
+        ).fetchone()
+        overview["rule_count"] = int(count_row["c"]) if count_row else 0
+    return overview
+
+
+def load_current(conn: sqlite3.Connection) -> dict[str, Any]:
+    range_id, rules_id = read_current_ids(conn)
+    if range_id is None or rules_id is None:
+        return {
+            "range_id": range_id,
+            "rules_id": rules_id,
+            "range": None,
+            "range_meta": None,
+            "rules_version_meta": None,
+            "rules": [],
+        }
+    return load_versioned(conn, range_id, rules_id)
 
 
 def list_attempts(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]]:

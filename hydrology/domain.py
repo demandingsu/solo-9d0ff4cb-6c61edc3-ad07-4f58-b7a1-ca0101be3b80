@@ -384,7 +384,23 @@ def coerce_pair(wl_raw: Any, fl_raw: Any) -> tuple[Optional[int], Optional[int],
 
 
 def classify_pair(rng: Range, rules: Sequence[Rule], wl: int, fl: int) -> dict[str, Any]:
-    """按现行口径判定单对读数的归属。"""
+    """按现行口径判定单对读数的归属（线性扫描，保留为无索引时的等价实现）。"""
+    return classify_rules(rng, rules, wl, fl, index=None)
+
+
+def classify_rules(
+    rng: Range,
+    rules: Sequence[Rule],
+    wl: int,
+    fl: int,
+    index: Any = None,
+) -> dict[str, Any]:
+    """单对读数判定的共享实现，首页查算与 ``/api/classify`` 走同一条路径。
+
+    传入 :class:`~hydrology.index.SpatialIndex` 时经双轴区间索引只检查局部
+    候选；否则退化为对全表的线性扫描。两条路径的命中集合、优先级裁决与
+    输出顺序完全一致：命中规则按 ``(priority, ord, id)`` 的原口径顺序返回。
+    """
     base: dict[str, Any] = {"water_level": wl, "flow": fl}
 
     if not rng.contains(wl, fl):
@@ -400,7 +416,10 @@ def classify_pair(rng: Range, rules: Sequence[Rule], wl: int, fl: int) -> dict[s
         )
         return base
 
-    hits = [r for r in rules if r.covers(wl, fl)]
+    if index is not None:
+        hits = list(index.query(wl, fl))
+    else:
+        hits = [r for r in rules if r.covers(wl, fl)]
     if not hits:
         base.update(
             {
